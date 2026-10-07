@@ -1,0 +1,12 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+sqlalchemy>=2.0.28
+psycopg2-binary>=2.9.9
+geopandas>=0.14.3
+fiona>=1.9.5
+shapely>=2.0.3
+pyproj>=3.6.1
+python-multipart>=0.0.9
+python-dotenv>=1.0.1
