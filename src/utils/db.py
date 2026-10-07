@@ -3,10 +3,8 @@ from contextlib import contextmanager
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-try:
-    from src.settings import settings
-except ImportError:
-    from settings import settings
+from src.utils.settings import settings
+
 
 engine = create_engine(
     settings.DATABASE_URL,

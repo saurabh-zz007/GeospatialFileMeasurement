@@ -29,7 +29,9 @@ MEASUREMENT_DISPATCH: dict[str, Callable[[BaseGeometry], tuple[Optional[float], 
 
 def enable_kml_driver() -> None:
     """Configures Fiona to enable KML driver support."""
+    #Performence optimization, as this import is heavy
     try:
+        #Lazy Importing ;-)
         import fiona.drvsupport
 
         fiona.drvsupport.supported_drivers["KML"] = "rw"
@@ -37,7 +39,7 @@ def enable_kml_driver() -> None:
     except Exception as exc:
         logger.warning(f"Could not configure Fiona KML drivers: {exc}")
 
-
+#Conditional Data parshing ;-)
 def sanitize_for_json(val: Any) -> Any:
     """Converts numpy, pandas, and datetime objects into JSON-compliant values."""
     match val:
@@ -61,13 +63,16 @@ def sanitize_for_json(val: Any) -> Any:
 
 def read_kml(file_path: Path) -> gpd.GeoDataFrame:
     """Reads a KML file into a GeoDataFrame."""
+    # Enable KML driver (Performence optimization, as this import is heavy)
     enable_kml_driver()
     try:
         return gpd.read_file(str(file_path), driver="KML")
     except Exception:
+        #Fallback to default driver, lets GeoPandas to just try its best to auto-detect
         return gpd.read_file(str(file_path))
 
-
+#Heaviest operations happens here, as we unzip the file, and read it, risk of getting OOM or No space left on Device type error
+#Limit no. of request that can be processed and Limit on the file upload size may solve this issue
 def read_shapefile_zip(zip_path: Path) -> gpd.GeoDataFrame:
     """Extracts a zipped shapefile and reads the .shp layer."""
     temp_dir = tempfile.mkdtemp(prefix="shp_")
@@ -80,6 +85,7 @@ def read_shapefile_zip(zip_path: Path) -> gpd.GeoDataFrame:
             return gpd.read_file(str(shp_files[0]))
         return gpd.read_file(str(zip_path))
     finally:
+        #Cleanup temp dir
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -101,9 +107,10 @@ def read_geospatial_file(file_path: Path | str, original_filename: str) -> tuple
     gdf = reader(file_path)
     if gdf is None or gdf.empty:
         raise ValueError("The uploaded geospatial file contains no valid data or layers.")
-
+    #CRS=> Coordinate Reference System
     # Detect or establish initial CRS
     if gdf.crs is None:
+        #Default CRS = EPSG:4326
         gdf.set_crs(epsg=4326, inplace=True)
         crs_str = "EPSG:4326"
     else:
@@ -136,7 +143,7 @@ def extract_features_and_measurements(
 
     records = []
     geom_col_name = gdf.geometry.name
-
+    #very slow loop, need optimization on this for huge files
     for idx in range(len(gdf)):
         orig_geom = gdf_wgs84.geometry.iloc[idx]
         proj_geom = gdf_projected.geometry.iloc[idx]

@@ -8,28 +8,17 @@ from uuid import UUID
 from fastapi import BackgroundTasks, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
-try:
-    from src.db import get_db_context
-    from src.helpers import extract_features_and_measurements, read_geospatial_file
-    from src.logs.data_transfer_objects import (
-        FeatureItemResponse,
-        FileMeasurementsResponse,
-        FileStatusResponse,
-        FileUploadResponse,
-    )
-    from src.logs.models import Feature, FileStatus, GeospatialFile
-    from src.settings import settings
-except ImportError:
-    from db import get_db_context
-    from helpers import extract_features_and_measurements, read_geospatial_file
-    from logs.data_transfer_objects import (
-        FeatureItemResponse,
-        FileMeasurementsResponse,
-        FileStatusResponse,
-        FileUploadResponse,
-    )
-    from logs.models import Feature, FileStatus, GeospatialFile
-    from settings import settings
+from src.utils.db import get_db_context
+from src.utils.helpers import extract_features_and_measurements, read_geospatial_file
+from src.logs.data_transfer_objects import (
+    FeatureItemResponse,
+    FileMeasurementsResponse,
+    FileStatusResponse,
+    FileUploadResponse,
+)
+from src.logs.models import Feature, FileStatus, GeospatialFile
+from src.utils.settings import settings
+
 
 logger = logging.getLogger(__name__)
 

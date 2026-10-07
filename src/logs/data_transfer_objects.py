@@ -3,10 +3,8 @@ from typing import Any, Optional
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
-try:
-    from src.logs.models import FileStatus
-except ImportError:
-    from logs.models import FileStatus
+from src.logs.models import FileStatus
+
 
 
 class FileUploadResponse(BaseModel):

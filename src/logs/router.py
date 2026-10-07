@@ -3,30 +3,18 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile, status
 from sqlalchemy.orm import Session
 
-try:
-    from src.db import get_db
-    from src.logs.controllers import (
-        get_file_measurements_controller,
-        get_file_status_controller,
-        handle_file_upload,
-    )
-    from src.logs.data_transfer_objects import (
-        FileMeasurementsResponse,
-        FileStatusResponse,
-        FileUploadResponse,
-    )
-except ImportError:
-    from db import get_db
-    from logs.controllers import (
-        get_file_measurements_controller,
-        get_file_status_controller,
-        handle_file_upload,
-    )
-    from logs.data_transfer_objects import (
-        FileMeasurementsResponse,
-        FileStatusResponse,
-        FileUploadResponse,
-    )
+from src.utils.db import get_db
+from src.logs.controllers import (
+    get_file_measurements_controller,
+    get_file_status_controller,
+    handle_file_upload,
+)
+from src.logs.data_transfer_objects import (
+    FileMeasurementsResponse,
+    FileStatusResponse,
+    FileUploadResponse,
+)
+
 
 router = APIRouter(prefix="/api/files", tags=["Geospatial Files"])
 

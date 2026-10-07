@@ -8,7 +8,7 @@ __pycache__/
 .env.local
 .env.*.local
 
-venv/
+myenv/
 .venv/
 env/
 ENV/

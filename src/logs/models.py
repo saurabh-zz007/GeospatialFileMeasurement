@@ -16,10 +16,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import JSON
 from sqlalchemy.orm import relationship
 
-try:
-    from src.db import Base
-except ImportError:
-    from db import Base
+from src.utils.db import Base
+
 
 
 class FileStatus(str, enum.Enum):
