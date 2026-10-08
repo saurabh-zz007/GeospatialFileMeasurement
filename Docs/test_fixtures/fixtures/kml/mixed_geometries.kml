@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document>
+<Placemark><name>my_point</name><ExtendedData><Data name="owner"><value>survey_team</value></Data></ExtendedData><Point><coordinates>0.5,0.5,0</coordinates></Point></Placemark>
+<Placemark><name>equator_line</name><LineString><coordinates>0.0,0.0,0 1.0,0.0,0</coordinates></LineString></Placemark>
+<Placemark><name>equator_box</name><Polygon><outerBoundaryIs><LinearRing><coordinates>1.0,0.0,0 1.0,1.0,0 0.0,1.0,0 0.0,0.0,0 1.0,0.0,0</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+</Document></kml>

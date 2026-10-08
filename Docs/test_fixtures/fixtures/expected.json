@@ -1,0 +1,218 @@
+{
+  "shapefile/equator_box.zip": {
+    "crs": "EPSG:4326",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "Polygon",
+        "area_m2": 12308778361.469452
+      }
+    ],
+    "properties_feature0": {
+      "name": "equator_box",
+      "owner": "survey_team",
+      "code": 1
+    }
+  },
+  "shapefile/box_60n.zip": {
+    "crs": "EPSG:4326",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "Polygon",
+        "area_m2": 6122943163.071411
+      }
+    ],
+    "note": "Web Mercator would give ~25.17e9, degrees would give 1.0"
+  },
+  "shapefile/polygon_with_hole.zip": {
+    "crs": "EPSG:4326",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "Polygon",
+        "area_m2": 118167064.3973771
+      }
+    ],
+    "note": "hole must be subtracted"
+  },
+  "shapefile/multipolygon.zip": {
+    "crs": "EPSG:4326",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "MultiPolygon",
+        "area_m2": 246180288.11433658
+      }
+    ]
+  },
+  "shapefile/lines.zip": {
+    "crs": "EPSG:4326",
+    "feature_count": 2,
+    "features": [
+      {
+        "type": "LineString",
+        "length_m": 111319.49079327357
+      },
+      {
+        "type": "LineString",
+        "length_m": 55799.4703932604
+      }
+    ]
+  },
+  "shapefile/points.zip": {
+    "crs": "EPSG:4326",
+    "feature_count": 3,
+    "features": [
+      {
+        "type": "Point",
+        "measurement": null
+      },
+      {
+        "type": "Point",
+        "measurement": null
+      },
+      {
+        "type": "Point",
+        "measurement": null
+      }
+    ]
+  },
+  "shapefile/utm_projected_rect.zip": {
+    "crs": "EPSG:32632",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "Polygon",
+        "area_m2": 2000000.0
+      }
+    ],
+    "note": "file CRS is projected; reported crs must be EPSG:32632, area must NOT be treated as degrees"
+  },
+  "shapefile/webmercator_box_60n.zip": {
+    "crs": "EPSG:3857",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "Polygon",
+        "area_m2": 6122943163.071411
+      }
+    ],
+    "note": "must transform to 4326/UTM, not measure in 3857"
+  },
+  "shapefile/no_prj.zip": {
+    "behaviour": "status FAILED with clear message OR assume EPSG:4326 with a warning. Must not crash.",
+    "if_assumed_4326_area_m2": 12308778361.469452
+  },
+  "shapefile/corrupt.zip": {
+    "behaviour": "400 at upload or status FAILED; no 500, no crash"
+  },
+  "shapefile/no_shp_inside.zip": {
+    "behaviour": "400 / FAILED: no .shp found in archive"
+  },
+  "shapefile/empty.zip": {
+    "behaviour": "400: empty file"
+  },
+  "shapefile/not_a_zip.txt": {
+    "behaviour": "400 / 415: unsupported extension"
+  },
+  "shapefile/missing_shx.zip": {
+    "behaviour": "either COMPLETED (shx restored) or FAILED with clear message; must not crash",
+    "if_completed_area_m2": 12308778361.469452
+  },
+  "shapefile/nested_folder.zip": {
+    "crs": "EPSG:4326",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "Polygon",
+        "area_m2": 12308778361.469452
+      }
+    ],
+    "note": ".shp is inside a subfolder of the zip; should still be found"
+  },
+  "kml/equator_box.kml": {
+    "crs": "EPSG:4326",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "Polygon",
+        "area_m2": 12308778361.469452
+      }
+    ]
+  },
+  "kml/box_60n.kml": {
+    "crs": "EPSG:4326",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "Polygon",
+        "area_m2": 6122943163.071411
+      }
+    ]
+  },
+  "kml/polygon_with_hole.kml": {
+    "crs": "EPSG:4326",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "Polygon",
+        "area_m2": 118167064.3973771
+      }
+    ]
+  },
+  "kml/mixed_geometries.kml": {
+    "crs": "EPSG:4326",
+    "feature_count": 3,
+    "features": [
+      {
+        "type": "Point",
+        "measurement": null
+      },
+      {
+        "type": "LineString",
+        "length_m": 111319.49079327357
+      },
+      {
+        "type": "Polygon",
+        "area_m2": 12308778361.469452
+      }
+    ]
+  },
+  "kml/utm_zone_crossing.kml": {
+    "crs": "EPSG:4326",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "Polygon",
+        "area_m2": 159328793.70812988
+      }
+    ]
+  },
+  "kml/line_60n.kml": {
+    "crs": "EPSG:4326",
+    "feature_count": 1,
+    "features": [
+      {
+        "type": "LineString",
+        "length_m": 55799.4703932604
+      }
+    ],
+    "note": "Web Mercator would give 111319 m"
+  },
+  "load/small_10": {
+    "feature_count": 10,
+    "note": "same content in .zip and .kml; total geodesic area below",
+    "total_area_m2": 2607852.046248615
+  },
+  "load/medium_1000": {
+    "feature_count": 1000,
+    "note": "same content in .zip and .kml; total geodesic area below",
+    "total_area_m2": 314756859.8179791
+  },
+  "load/large_20000": {
+    "feature_count": 20000,
+    "note": "same content in .zip and .kml; total geodesic area below",
+    "total_area_m2": 6149712001.513118
+  }
+}

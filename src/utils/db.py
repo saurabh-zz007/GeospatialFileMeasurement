@@ -6,10 +6,18 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from src.utils.settings import settings
 
 
+# NOTE ON POSTGRES MAX_CONNECTIONS:
+# Ensure that: total_app_instances * (POOL_SIZE + MAX_OVERFLOW) < Postgres max_connections.
+# Background worker concurrency is bounded by settings.MAX_CONCURRENT_WORKERS (default 2-4),
+# and background jobs release DB sessions during parsing/measuring, so connections
+# are only held briefly during status updates and chunked bulk inserts.
 engine = create_engine(
     settings.DATABASE_URL,
-    pool_pre_ping=True,
-    future=True
+    pool_size=settings.POOL_SIZE,
+    max_overflow=settings.MAX_OVERFLOW,
+    pool_timeout=settings.POOL_TIMEOUT,
+    pool_pre_ping=settings.POOL_PRE_PING,
+    future=True,
 )
 
 SessionLocal = sessionmaker(

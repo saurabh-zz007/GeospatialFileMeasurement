@@ -2,8 +2,8 @@ import logging
 import math
 import shutil
 import tempfile
+import time
 import zipfile
-from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -11,27 +11,220 @@ from typing import Any, Optional
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+from pyproj import Transformer
+import shapely
+import shapely.ops
+import shapely.validation
 from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
 
 logger = logging.getLogger(__name__)
 
-# Dispatch table mapping geometry types to metric measurement calculations
-MEASUREMENT_DISPATCH: dict[str, Callable[[BaseGeometry], tuple[Optional[float], Optional[str]]]] = {
-    "Polygon": lambda g: (round(float(g.area), 4), "sq meters"),
-    "MultiPolygon": lambda g: (round(float(g.area), 4), "sq meters"),
-    "LineString": lambda g: (round(float(g.length), 4), "meters"),
-    "MultiLineString": lambda g: (round(float(g.length), 4), "meters"),
-    "Point": lambda _: (None, None),
-    "MultiPoint": lambda _: (None, None),
+# Standard human-readable processing error messages
+ERROR_INVALID_ZIP = "not a valid zip"
+ERROR_EMPTY_FILE = "empty file"
+ERROR_NO_SHP = "no .shp found in archive"
+ERROR_MISSING_PRJ = "missing .prj (coordinate system unknown)"
+ERROR_NO_FEATURES = "no features could be read (possibly missing/corrupt .shx)"
+ERROR_UNEXPECTED = "unexpected processing error"
+
+
+class GeospatialProcessingError(Exception):
+    """User-facing processing error with specific message."""
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+# Fields always injected by Fiona/GDAL KML driver with default/null values
+KML_DROP_FIELDS = {
+    "id",
+    "icon",
+    "drawOrder",
+    "altitudeMode",
+    "tessellate",
+    "visibility",
+    "extrude",
 }
+
+# Thread-safe cache of pyproj Transformer instances
+_TRANSFORMER_CACHE: dict[tuple[str, str], Transformer] = {}
+
+
+def get_transformer(to_crs: str, from_crs: str = "EPSG:4326") -> Transformer:
+    """Retrieves or creates a cached pyproj Transformer with always_xy=True."""
+    key = (from_crs, to_crs)
+    if key not in _TRANSFORMER_CACHE:
+        _TRANSFORMER_CACHE[key] = Transformer.from_crs(from_crs, to_crs, always_xy=True)
+    return _TRANSFORMER_CACHE[key]
+
+
+def utm_epsg(lon: float, lat: float) -> int:
+    """Calculates UTM EPSG code based on longitude and latitude."""
+    zone = int((lon + 180) // 6) + 1
+    zone = min(60, max(1, zone))
+    return (32600 if lat >= 0 else 32700) + zone
+
+
+def choose_measurement_crs(lon: float, lat: float) -> str:
+    """
+    Selects metric projected CRS based on centroid (lon, lat) in WGS84:
+    - UTM zone for latitudes between 80°S and 84°N
+    - EPSG:3031 (Antarctic Polar Stereographic) for lat < -80°
+    - EPSG:3413 (NSIDC Sea Ice Polar Stereographic North) for lat > 84°
+    """
+    if lat < -80.0:
+        return "EPSG:3031"
+    elif lat > 84.0:
+        return "EPSG:3413"
+    else:
+        return f"EPSG:{utm_epsg(lon, lat)}"
+
+
+def round_coordinates(coords: Any, decimals: int = 9) -> Any:
+    """Recursively rounds coordinates in nested lists/tuples to specified decimals."""
+    if isinstance(coords, (float, np.floating)):
+        return round(float(coords), decimals)
+    if isinstance(coords, (list, tuple)):
+        return [round_coordinates(c, decimals) for c in coords]
+    return coords
+
+
+def round_geometry_coordinates(geo_dict: Optional[dict[str, Any]], decimals: int = 9) -> Optional[dict[str, Any]]:
+    """Rounds coordinates of GeoJSON geometry mapping to specified decimals."""
+    if not geo_dict:
+        return geo_dict
+    result = dict(geo_dict)
+    if "coordinates" in result:
+        result["coordinates"] = round_coordinates(result["coordinates"], decimals)
+    if "geometries" in result:
+        result["geometries"] = [round_geometry_coordinates(g, decimals) for g in result["geometries"]]
+    return result
+
+
+def sanitize_for_json(val: Any) -> Any:
+    """Converts numpy, pandas, and datetime objects into JSON-compliant values, converting NaN/inf/NaT to None."""
+    if val is None:
+        return None
+
+    if val is pd.NA or val is pd.NaT:
+        return None
+
+    if isinstance(val, (int, np.integer)) and not isinstance(val, bool):
+        return int(val)
+
+    if isinstance(val, bool):
+        return bool(val)
+
+    if isinstance(val, (float, np.floating)):
+        if math.isnan(val) or math.isinf(val):
+            return None
+        return float(val)
+
+    if isinstance(val, str):
+        s_val = val.strip()
+        if s_val in ("NaT", "nan", "NaN", "NAN", "<NA>", "inf", "-inf", "Infinity", "-Infinity"):
+            return None
+        return val
+
+    if isinstance(val, (datetime, date, pd.Timestamp)):
+        if pd.isna(val):
+            return None
+        return val.isoformat()
+
+    if isinstance(val, (list, tuple, np.ndarray)):
+        return [sanitize_for_json(item) for item in val]
+
+    if isinstance(val, dict):
+        return {str(k): sanitize_for_json(v) for k, v in val.items()}
+
+    try:
+        if pd.isna(val):
+            return None
+    except Exception:
+        pass
+
+    return str(val)
+
+
+def clean_feature_properties(
+    row_attributes: dict[str, Any],
+    is_kml: bool = False,
+) -> dict[str, Any]:
+    """
+    Sanitizes properties dictionary:
+    - Drops default/always-null KML metadata attributes if is_kml is True
+    - Converts NaT, NaN, Infinity, and empty/unrepresentable values to None
+    """
+    cleaned = {}
+    for k, v in row_attributes.items():
+        if is_kml and k in KML_DROP_FIELDS:
+            continue
+        cleaned[str(k)] = sanitize_for_json(v)
+    return cleaned
+
+
+def calculate_metric_measurement(
+    geom_wgs84: Optional[BaseGeometry],
+) -> tuple[Optional[float], Optional[str], Optional[str], Optional[str]]:
+    """
+    Calculates metric area or length by projecting 2D WGS84 geometry to appropriate UTM/polar CRS.
+    Returns: (measurement, measurement_unit, measurement_crs, note)
+    """
+    if geom_wgs84 is None:
+        return None, None, None, "Geometry is null"
+
+    if geom_wgs84.is_empty:
+        return None, None, None, "Geometry is empty"
+
+    if not geom_wgs84.is_valid:
+        reason = shapely.validation.explain_validity(geom_wgs84)
+        return None, None, None, f"Invalid geometry: {reason}"
+
+    geom_type = geom_wgs84.geom_type
+
+    # Point / MultiPoint: measurement null, no crash, no note
+    if geom_type in ("Point", "MultiPoint"):
+        return None, None, None, None
+
+    # Unsupported types (GeometryCollection, etc.)
+    if geom_type not in ("Polygon", "MultiPolygon", "LineString", "MultiLineString"):
+        return None, None, None, f"Unsupported geometry type: {geom_type}"
+
+    try:
+        # Ignore Z coordinates (2D only)
+        geom_2d = shapely.force_2d(geom_wgs84)
+        centroid = geom_2d.centroid
+
+        if centroid.is_empty or math.isnan(centroid.x) or math.isnan(centroid.y):
+            return None, None, None, "Could not compute geometry centroid"
+
+        target_crs = choose_measurement_crs(centroid.x, centroid.y)
+        transformer = get_transformer(to_crs=target_crs, from_crs="EPSG:4326")
+        proj_geom = shapely.ops.transform(transformer.transform, geom_2d)
+
+        if geom_type in ("Polygon", "MultiPolygon"):
+            # Area in square meters (holes are automatically subtracted)
+            measurement = round(float(proj_geom.area), 4)
+            unit = "sq meters"
+        elif geom_type in ("LineString", "MultiLineString"):
+            # Length in meters
+            measurement = round(float(proj_geom.length), 4)
+            unit = "meters"
+        else:
+            measurement = None
+            unit = None
+
+        return measurement, unit, target_crs, None
+
+    except Exception as exc:
+        logger.warning(f"Error computing measurement for geometry {geom_type}: {exc}")
+        return None, None, None, f"Measurement calculation failed: {exc}"
 
 
 def enable_kml_driver() -> None:
     """Configures Fiona to enable KML driver support."""
-    #Performence optimization, as this import is heavy
     try:
-        #Lazy Importing ;-)
         import fiona.drvsupport
 
         fiona.drvsupport.supported_drivers["KML"] = "rw"
@@ -39,53 +232,76 @@ def enable_kml_driver() -> None:
     except Exception as exc:
         logger.warning(f"Could not configure Fiona KML drivers: {exc}")
 
-#Conditional Data parshing ;-)
-def sanitize_for_json(val: Any) -> Any:
-    """Converts numpy, pandas, and datetime objects into JSON-compliant values."""
-    match val:
-        case None | int() | bool() | str():
-            return val
-        case float() | np.floating():
-            return None if (math.isnan(val) or math.isinf(val)) else float(val)
-        case np.integer():
-            return int(val)
-        case datetime() | date() | pd.Timestamp():
-            return val.isoformat()
-        case list() | tuple() | np.ndarray():
-            return [sanitize_for_json(item) for item in val]
-        case dict():
-            return {str(k): sanitize_for_json(v) for k, v in val.items()}
-        case _ if pd.isna(val):
-            return None
-        case _:
-            return str(val)
-
 
 def read_kml(file_path: Path) -> gpd.GeoDataFrame:
     """Reads a KML file into a GeoDataFrame."""
-    # Enable KML driver (Performence optimization, as this import is heavy)
+    file_path = Path(file_path)
+    if not file_path.exists() or file_path.stat().st_size == 0:
+        raise GeospatialProcessingError(ERROR_EMPTY_FILE)
+
     enable_kml_driver()
     try:
-        return gpd.read_file(str(file_path), driver="KML")
+        gdf = gpd.read_file(str(file_path), driver="KML")
     except Exception:
-        #Fallback to default driver, lets GeoPandas to just try its best to auto-detect
-        return gpd.read_file(str(file_path))
+        try:
+            gdf = gpd.read_file(str(file_path))
+        except Exception as exc:
+            logger.exception(f"Error reading KML {file_path}: {exc}")
+            raise GeospatialProcessingError(ERROR_NO_FEATURES) from exc
 
-#Heaviest operations happens here, as we unzip the file, and read it, risk of getting OOM or No space left on Device type error
-#Limit no. of request that can be processed and Limit on the file upload size may solve this issue
+    if gdf is None or gdf.empty or len(gdf) == 0:
+        raise GeospatialProcessingError(ERROR_NO_FEATURES)
+
+    return gdf
+
+
 def read_shapefile_zip(zip_path: Path) -> gpd.GeoDataFrame:
     """Extracts a zipped shapefile and reads the .shp layer."""
+    zip_path = Path(zip_path)
+    if not zip_path.exists() or zip_path.stat().st_size == 0:
+        raise GeospatialProcessingError(ERROR_EMPTY_FILE)
+
+    if not zipfile.is_zipfile(zip_path):
+        raise GeospatialProcessingError(ERROR_INVALID_ZIP)
+
     temp_dir = tempfile.mkdtemp(prefix="shp_")
     try:
-        with zipfile.ZipFile(zip_path, "r") as archive:
-            archive.extractall(temp_dir)
+        try:
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                namelist = archive.namelist()
+                if not namelist:
+                    raise GeospatialProcessingError(ERROR_EMPTY_FILE)
+                archive.extractall(temp_dir)
+        except zipfile.BadZipFile:
+            raise GeospatialProcessingError(ERROR_INVALID_ZIP)
 
         shp_files = list(Path(temp_dir).rglob("*.shp"))
-        if shp_files:
-            return gpd.read_file(str(shp_files[0]))
-        return gpd.read_file(str(zip_path))
+        if not shp_files:
+            raise GeospatialProcessingError(ERROR_NO_SHP)
+
+        shp_file = shp_files[0]
+        if shp_file.stat().st_size == 0:
+            raise GeospatialProcessingError(ERROR_EMPTY_FILE)
+
+        # Check for .prj file
+        prj_file = shp_file.with_suffix(".prj")
+        if not prj_file.exists() or prj_file.stat().st_size == 0:
+            raise GeospatialProcessingError(ERROR_MISSING_PRJ)
+
+        try:
+            gdf = gpd.read_file(str(shp_file))
+        except Exception as exc:
+            logger.exception(f"Error reading shapefile {shp_file}: {exc}")
+            raise GeospatialProcessingError(ERROR_NO_FEATURES) from exc
+
+        if gdf is None or gdf.empty or len(gdf) == 0:
+            raise GeospatialProcessingError(ERROR_NO_FEATURES)
+
+        if gdf.crs is None:
+            raise GeospatialProcessingError(ERROR_MISSING_PRJ)
+
+        return gdf
     finally:
-        #Cleanup temp dir
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -100,67 +316,84 @@ def read_geospatial_file(file_path: Path | str, original_filename: str) -> tuple
     file_path = Path(file_path)
     extension = Path(original_filename).suffix.lower()
 
+    if not file_path.exists() or file_path.stat().st_size == 0:
+        raise GeospatialProcessingError(ERROR_EMPTY_FILE)
+
     reader = FILE_READERS.get(extension)
     if not reader:
-        raise ValueError(f"Unsupported file format '{extension}'. Allowed: {list(FILE_READERS.keys())}")
+        raise GeospatialProcessingError(f"Unsupported file format '{extension}'. Allowed: {list(FILE_READERS.keys())}")
 
     gdf = reader(file_path)
-    if gdf is None or gdf.empty:
-        raise ValueError("The uploaded geospatial file contains no valid data or layers.")
-    #CRS=> Coordinate Reference System
+    if gdf is None or gdf.empty or len(gdf) == 0:
+        raise GeospatialProcessingError(ERROR_NO_FEATURES)
+
     # Detect or establish initial CRS
     if gdf.crs is None:
-        #Default CRS = EPSG:4326
-        gdf.set_crs(epsg=4326, inplace=True)
-        crs_str = "EPSG:4326"
+        if extension == ".zip":
+            raise GeospatialProcessingError(ERROR_MISSING_PRJ)
+        else:
+            gdf.set_crs(epsg=4326, inplace=True)
+            crs_str = "EPSG:4326"
     else:
         crs_str = gdf.crs.to_string()
 
     return gdf, crs_str
 
 
-def calculate_feature_measurement(geom: Optional[BaseGeometry]) -> tuple[Optional[float], Optional[str]]:
-    """Calculates metric area/length using the dispatch table."""
-    if not geom or geom.is_empty:
-        return None, None
-    handler = MEASUREMENT_DISPATCH.get(geom.geom_type)
-    return handler(geom) if handler else (None, None)
-
-
 def extract_features_and_measurements(
     gdf: gpd.GeoDataFrame,
-    target_projected_crs: str = "EPSG:3857"
+    is_kml: bool = False,
+    target_projected_crs: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Projects geographic data to metric CRS and extracts features and measurements."""
-    # Ensure WGS84 for GeoJSON geometry export
-    try:
-        gdf_wgs84 = gdf.to_crs(epsg=4326) if (gdf.crs and gdf.crs.to_epsg() != 4326) else gdf
-    except Exception:
+    """
+    Reprojects source geographic data to WGS84 if not already 4326,
+    rounds geometry coordinates to 9 decimals, and calculates measurements.
+    """
+    # Ensure WGS84 (EPSG:4326) for GeoJSON geometry export and centroid calculations
+    if gdf.crs is not None:
+        try:
+            is_4326 = (gdf.crs.to_epsg() == 4326)
+        except Exception:
+            is_4326 = ("4326" in str(gdf.crs))
+
+        if not is_4326:
+            gdf_wgs84 = gdf.to_crs(epsg=4326)
+        else:
+            gdf_wgs84 = gdf
+    else:
         gdf_wgs84 = gdf
 
-    # Reproject to metric system if CRS is geographic (degrees)
-    gdf_projected = gdf.to_crs(target_projected_crs) if (gdf.crs and gdf.crs.is_geographic) else gdf
+    geom_col_name = gdf.geometry.name
+    non_geom_cols = [c for c in gdf.columns if c != geom_col_name]
+    props_records = gdf[non_geom_cols].to_dict(orient="records") if non_geom_cols else [{} for _ in range(len(gdf))]
+    geoms = list(gdf_wgs84.geometry) if hasattr(gdf_wgs84, "geometry") else [None] * len(gdf)
 
     records = []
-    geom_col_name = gdf.geometry.name
-    #very slow loop, need optimization on this for huge files
     for idx in range(len(gdf)):
-        orig_geom = gdf_wgs84.geometry.iloc[idx]
-        proj_geom = gdf_projected.geometry.iloc[idx]
+        if idx % 50 == 0:
+            time.sleep(0.001)
 
-        if not orig_geom or orig_geom.is_empty:
-            continue
+        orig_geom = geoms[idx]
 
-        measurement, unit = calculate_feature_measurement(proj_geom)
-        row_attributes = gdf.iloc[idx].drop(labels=[geom_col_name], errors="ignore").to_dict()
+        geom_type = orig_geom.geom_type if orig_geom is not None else None
+        geom_2d_wgs84 = shapely.force_2d(orig_geom) if orig_geom is not None else None
+
+        measurement, unit, measurement_crs, note = calculate_metric_measurement(orig_geom)
+        clean_properties = clean_feature_properties(props_records[idx], is_kml=is_kml)
+
+        # Round returned geometry coordinates to 9 decimals
+        geom_mapping = mapping(geom_2d_wgs84) if geom_2d_wgs84 is not None else None
+        rounded_geom = round_geometry_coordinates(geom_mapping, decimals=9) if geom_mapping is not None else None
 
         records.append({
             "feature_index": idx,
-            "geometry_type": orig_geom.geom_type,
-            "geometry": sanitize_for_json(mapping(orig_geom)),
-            "properties": sanitize_for_json(row_attributes),
+            "geometry_type": geom_type,
+            "geometry": sanitize_for_json(rounded_geom) if rounded_geom is not None else None,
+            "properties": clean_properties,
             "measurement": measurement,
             "measurement_unit": unit,
+            "measurement_crs": measurement_crs,
+            "note": note,
         })
 
     return records

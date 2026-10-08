@@ -1,4 +1,5 @@
 import enum
+from typing import Optional
 import uuid
 from sqlalchemy import (
     Column,
@@ -44,6 +45,7 @@ class GeospatialFile(Base):
     crs = Column(String(100), nullable=True)
     feature_count = Column(Integer, nullable=True, default=0)
     error_message = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -52,6 +54,10 @@ class GeospatialFile(Base):
         onupdate=func.now(),
         nullable=False
     )
+
+    @property
+    def source_crs(self) -> Optional[str]:
+        return self.crs
 
     features = relationship(
         "Feature",
@@ -72,9 +78,11 @@ class Feature(Base):
         index=True
     )
     feature_index = Column(Integer, nullable=False)
-    geometry_type = Column(String(50), nullable=False)
-    geometry = Column(JSONType, nullable=False)
+    geometry_type = Column(String(50), nullable=True)
+    geometry = Column(JSONType, nullable=True)
     properties = Column(JSONType, nullable=False, default=dict)
     measurement = Column(Float, nullable=True)
+    measurement_crs = Column(String(50), nullable=True)
+    note = Column(Text, nullable=True)
 
     geospatial_file = relationship("GeospatialFile", back_populates="features")
