@@ -90,24 +90,33 @@ Base = declarative_base()
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI request-scoped async database session dependency."""
-    async with AsyncSessionLocal() as session:
+    session = AsyncSessionLocal()
+    try:
+        yield session
+    finally:
         try:
-            yield session
-        finally:
             await session.close()
+        except Exception:
+            pass
 
 
 @asynccontextmanager
 async def get_async_db_context() -> AsyncGenerator[AsyncSession, None]:
     """Independent async database session context manager for background workers."""
-    async with AsyncSessionLocal() as session:
+    session = AsyncSessionLocal()
+    try:
+        yield session
+    except Exception:
         try:
-            yield session
-        except Exception:
             await session.rollback()
-            raise
-        finally:
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
             await session.close()
+        except Exception:
+            pass
 
 
 # Alias for backward-compatible background imports

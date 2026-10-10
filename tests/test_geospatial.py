@@ -1,7 +1,9 @@
 import io
 import math
 import time
+import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,6 +40,7 @@ from src.utils.helpers import (
 
 TEST_FILES_DIR = Path(__file__).resolve().parent.parent / "Docs" / "Test Files"
 client = TestClient(app)
+client.__enter__()
 
 
 # ==============================================================================
@@ -674,5 +677,147 @@ def test_concurrent_polling_during_20k_feature_processing():
 
     assert median_latency < 0.5, f"Median GET latency {median_latency * 1000:.1f}ms exceeded 500ms threshold!"
     assert p90_latency < 0.5, f"P90 GET latency {p90_latency * 1000:.1f}ms exceeded 500ms threshold!"
+
+
+def test_concurrent_30_uploads_bounded_pool():
+    """
+    Fires 30 uploads concurrently with POOL_SIZE=5, MAX_OVERFLOW=5.
+    Asserts:
+      1. No HTTP 500 errors occur on any request.
+      2. All 30 files eventually reach COMPLETED status.
+      3. Concurrent GET /api/files/{id}/ polling stays fast (< 500 ms per request).
+    """
+    import httpx
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from src.utils.settings import settings
+
+    orig_rl = settings.RATE_LIMIT_ENABLED
+    settings.RATE_LIMIT_ENABLED = False
+
+    box_file = (
+        Path(__file__).resolve().parent.parent
+        / "Docs"
+        / "test_fixtures"
+        / "fixtures"
+        / "shapefile"
+        / "box_60n.zip"
+    )
+    assert box_file.exists(), f"Fixture not found at {box_file}"
+    file_bytes = box_file.read_bytes()
+
+    is_live_server = False
+    try:
+        with httpx.Client(base_url="http://localhost:8000", timeout=1.0) as check_c:
+            if check_c.get("/health").status_code == 200:
+                is_live_server = True
+    except Exception:
+        is_live_server = False
+
+    try:
+        if is_live_server:
+            def _upload(idx: int):
+                with httpx.Client(base_url="http://localhost:8000", timeout=30.0) as cl:
+                    resp = cl.post(
+                        "/api/files/",
+                        files={"file": (f"box_60n_{idx}.zip", file_bytes, "application/zip")},
+                    )
+                    assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.text}"
+                    data = resp.json()
+                    assert "id" in data
+                    return data["id"]
+
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(_upload, i) for i in range(30)]
+                file_ids = [f.result() for f in as_completed(futures)]
+            assert len(file_ids) == 30
+
+            get_latencies = []
+            max_wait = 90
+            t_start = time.time()
+            pending_ids = set(file_ids)
+
+            with httpx.Client(base_url="http://localhost:8000", timeout=10.0) as cl:
+                while pending_ids and (time.time() - t_start < max_wait):
+                    for fid in list(pending_ids):
+                        t_req = time.perf_counter()
+                        get_resp = cl.get(f"/api/files/{fid}/")
+                        dur = time.perf_counter() - t_req
+                        get_latencies.append(dur)
+
+                        assert get_resp.status_code == 200, f"Expected 200, got {get_resp.status_code}"
+                        status_val = get_resp.json().get("status")
+                        if status_val == "COMPLETED":
+                            pending_ids.remove(fid)
+                        elif status_val == "FAILED":
+                            pytest.fail(f"File {fid} unexpectedly FAILED: {get_resp.json().get('error')}")
+                    time.sleep(0.3)
+
+            assert len(pending_ids) == 0, f"{len(pending_ids)} files failed to reach COMPLETED within {max_wait}s: {pending_ids}"
+
+            median_get = sorted(get_latencies)[len(get_latencies) // 2]
+            assert median_get < 0.5, f"Median GET latency {median_get * 1000:.1f}ms exceeded 500ms threshold!"
+        else:
+            import asyncio
+            from httpx import AsyncClient, ASGITransport
+
+            async def _run_asgi():
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    async def _up(idx: int):
+                        resp = await ac.post(
+                            "/api/files/",
+                            files={"file": (f"box_60n_{idx}.zip", file_bytes, "application/zip")},
+                        )
+                        assert resp.status_code == 202
+                        return resp.json()["id"]
+
+                    fids = await asyncio.gather(*[_up(i) for i in range(30)])
+                    assert len(fids) == 30
+
+                    get_latencies = []
+                    max_wait = 90
+                    t_start = time.time()
+                    pending_ids = set(fids)
+
+                    while pending_ids and (time.time() - t_start < max_wait):
+                        for fid in list(pending_ids):
+                            t_req = time.perf_counter()
+                            get_resp = await ac.get(f"/api/files/{fid}/")
+                            dur = time.perf_counter() - t_req
+                            get_latencies.append(dur)
+                            assert get_resp.status_code == 200
+                            status_val = get_resp.json().get("status")
+                            if status_val == "COMPLETED":
+                                pending_ids.remove(fid)
+                            elif status_val == "FAILED":
+                                pytest.fail(f"File {fid} unexpectedly FAILED: {get_resp.json().get('error')}")
+                        await asyncio.sleep(0.3)
+
+                    assert len(pending_ids) == 0
+                    median_get = sorted(get_latencies)[len(get_latencies) // 2]
+                    p90_idx = int(len(get_latencies) * 0.90)
+                    p90_get = sorted(get_latencies)[p90_idx]
+                    assert median_get < 0.5
+                    assert p90_get < 0.5
+
+            asyncio.run(_run_asgi())
+    finally:
+        settings.RATE_LIMIT_ENABLED = orig_rl
+
+
+def test_db_pool_timeout_exception_handler():
+    """Verifies that sqlalchemy.exc.TimeoutError is mapped to HTTP 503 with Retry-After header."""
+    from sqlalchemy.exc import TimeoutError as SATimeoutError
+    from unittest.mock import patch
+
+    with patch(
+        "src.logs.router.get_file_status_controller",
+        side_effect=SATimeoutError("QueuePool limit of size 5 overflow 5 reached"),
+    ):
+        resp = client.get(f"/api/files/{uuid.uuid4()}/")
+        assert resp.status_code == 503
+        assert resp.headers.get("Retry-After") == "5"
+        data = resp.json()
+        assert "Database connection pool timeout" in (data.get("detail") or data.get("error", ""))
 
 

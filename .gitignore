@@ -29,3 +29,6 @@ htmlcov/
 
 *.log
 src/logs/*.log
+
+# Private documentation & interview study guide
+details.md

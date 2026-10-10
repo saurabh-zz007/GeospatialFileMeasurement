@@ -13,7 +13,7 @@ from fastapi import BackgroundTasks, HTTPException, UploadFile, status
 from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.utils.db import get_async_db_context
+from src.utils.db import AsyncSessionLocal, get_async_db_context
 from src.utils.helpers import (
     ERROR_NO_FEATURES,
     ERROR_UNEXPECTED,
@@ -33,6 +33,9 @@ from src.utils.settings import settings
 logger = logging.getLogger(__name__)
 
 ALLOWED_EXTENSIONS = {".zip", ".kml"}
+
+# Bounded concurrency semaphore for background processing jobs
+job_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_JOBS)
 
 # Bounded worker thread pool for CPU-bound background processing
 _WORKER_EXECUTOR: Optional[ThreadPoolExecutor] = None
@@ -64,7 +67,7 @@ def _cleanup_temp_file(path_str: str) -> None:
 async def handle_file_upload(
     file: UploadFile,
     background_tasks: BackgroundTasks,
-    db: AsyncSession,
+    db: Optional[AsyncSession] = None,
 ) -> FileUploadResponse:
     """
     Validates uploaded file, stores temp copy asynchronously,
@@ -121,36 +124,42 @@ async def handle_file_upload(
             detail=f"Failed to save uploaded file: {exc}",
         ) from exc
 
-    # Persist PENDING file tracking record
-    db_file = GeospatialFile(
-        filename=file.filename,
-        status=FileStatus.PENDING,
-        feature_count=0,
-    )
-    db.add(db_file)
-    await db.commit()
-    await db.refresh(db_file)
+    # Persist PENDING file tracking record using dedicated short session so no connection is held
+    async with AsyncSessionLocal() as session:
+        db_file = GeospatialFile(
+            filename=file.filename,
+            status=FileStatus.PENDING,
+            feature_count=0,
+        )
+        session.add(db_file)
+        await session.commit()
+        await session.refresh(db_file)
+        file_id = db_file.id
+        file_name = db_file.filename
+        file_status = db_file.status
+
 
     # Dispatch main background processing task
     background_tasks.add_task(
         process_geospatial_file_task,
-        file_id=db_file.id,
+        file_id=file_id,
         temp_file_path=str(temp_path),
-        original_filename=file.filename,
+        original_filename=file_name,
     )
 
     return FileUploadResponse(
-        id=db_file.id,
-        filename=db_file.filename,
-        status=db_file.status,
+        id=file_id,
+        filename=file_name,
+        status=file_status,
     )
 
 
 def _cpu_bound_parse_and_measure(
     path: str,
     filename: str,
-) -> tuple[Optional[list[dict[str, Any]]], Optional[str], Optional[str]]:
-    """Synchronous CPU-bound geospatial parsing and measurement computation."""
+    file_id: UUID,
+) -> tuple[Optional[list[dict[str, Any]]], Optional[str], Optional[str], int]:
+    """Synchronous CPU-bound geospatial parsing, measurement, and record formatting."""
     try:
         gdf, crs_str = read_geospatial_file(path, filename)
         is_kml = Path(filename).suffix.lower() == ".kml"
@@ -159,83 +168,9 @@ def _cpu_bound_parse_and_measure(
             is_kml=is_kml,
         )
         if not records:
-            return None, crs_str, ERROR_NO_FEATURES
-        return records, crs_str, None
-    except GeospatialProcessingError as proc_err:
-        logger.warning(f"Processing error for file ({filename}): {proc_err.message}")
-        return None, None, proc_err.message
-    except Exception as proc_exc:
-        logger.exception(f"Unexpected processing error for file ({filename}): {proc_exc}")
-        return None, None, ERROR_UNEXPECTED
-    finally:
-        _cleanup_temp_file(path)
+            return None, crs_str, ERROR_NO_FEATURES, 0
 
-
-async def process_geospatial_file_task(
-    file_id: UUID,
-    temp_file_path: str,
-    original_filename: str,
-) -> None:
-    """
-    Three-phase background processing pipeline using the Sandwich Pattern:
-      Phase (a) [Top Bread - Async I/O]: Short async DB session - mark PROCESSING and verify job existence.
-      Phase (b) [Filling - Worker Thread Pool]: Offloaded CPU-bound file reading, projecting, and measuring.
-                 Because this is offloaded to a thread pool via run_in_executor, it DOES NOT block the main thread
-                 event loop. Crucially, NO DB connection is held during this CPU-heavy computation.
-      Phase (c) [Bottom Bread - Async I/O]: Short async DB session - chunked bulk insert features in one transaction
-                 and mark COMPLETED or FAILED.
-    """
-    logger.info(f"Processing started for file {file_id} ({original_filename})")
-
-    # --------------------------------------------------------------------------
-    # Phase (a) - Top Bread: Short async session - mark status as PROCESSING
-    # --------------------------------------------------------------------------
-    file_exists = False
-    async with get_async_db_context() as db:
-        stmt = select(GeospatialFile).where(GeospatialFile.id == file_id)
-        result = await db.execute(stmt)
-        db_file = result.scalars().first()
-        if db_file:
-            db_file.status = FileStatus.PROCESSING
-            await db.commit()
-            file_exists = True
-        else:
-            logger.error(f"File ID {file_id} not found in database.")
-
-    if not file_exists:
-        _cleanup_temp_file(temp_file_path)
-        return
-
-    # --------------------------------------------------------------------------
-    # Phase (b) - Filling: Offloaded CPU-bound parsing & calculations (NO DB session held)
-    # --------------------------------------------------------------------------
-    loop = asyncio.get_running_loop()
-    records, crs_str, error_msg = await loop.run_in_executor(
-        get_worker_executor(),
-        _cpu_bound_parse_and_measure,
-        temp_file_path,
-        original_filename,
-    )
-
-    # --------------------------------------------------------------------------
-    # Phase (c) - Bottom Bread: Short async session - chunked bulk insert & mark terminal status
-    # --------------------------------------------------------------------------
-    async with get_async_db_context() as db:
-        stmt = select(GeospatialFile).where(GeospatialFile.id == file_id)
-        result = await db.execute(stmt)
-        db_file = result.scalars().first()
-        if not db_file:
-            logger.error(f"File ID {file_id} disappeared from database.")
-            return
-
-        if error_msg is not None:
-            db_file.status = FileStatus.FAILED
-            db_file.error_message = error_msg
-            db_file.error = error_msg
-            await db.commit()
-            return
-
-        # Prepare records for chunked bulk insertion
+        # Construct database feature dictionaries in thread to keep event loop free
         feature_dicts = [
             {
                 "id": uuid.uuid4(),
@@ -250,20 +185,111 @@ async def process_geospatial_file_task(
             }
             for rec in records
         ]
+        return feature_dicts, crs_str, None, len(records)
+    except GeospatialProcessingError as proc_err:
+        logger.warning(f"Processing error for file ({filename}): {proc_err.message}")
+        return None, None, proc_err.message, 0
+    except Exception as proc_exc:
+        logger.exception(f"Unexpected processing error for file ({filename}): {proc_exc}")
+        return None, None, ERROR_UNEXPECTED, 0
+    finally:
+        _cleanup_temp_file(path)
 
-        # Bulk insert in chunks of 2,000 rows per statement in one single transaction
-        CHUNK_SIZE = 2000
-        for i in range(0, len(feature_dicts), CHUNK_SIZE):
-            chunk = feature_dicts[i : i + CHUNK_SIZE]
-            await db.execute(insert(Feature), chunk)
 
-        db_file.crs = crs_str
-        db_file.feature_count = len(records)
-        db_file.status = FileStatus.COMPLETED
-        db_file.error_message = None
-        db_file.error = None
-        await db.commit()
-        logger.info(f"Successfully saved {len(records)} features for file {file_id}.")
+async def process_geospatial_file_task(
+    file_id: UUID,
+    temp_file_path: str,
+    original_filename: str,
+) -> None:
+    """
+    Three-phase background processing pipeline:
+      Phase (a): Short async DB session via AsyncSessionLocal() - mark PROCESSING and verify job existence.
+      Phase (b): NO session open - offloaded CPU/IO-bound file reading, projecting, measuring, and
+                 formatting via asyncio.to_thread.
+      Phase (c): Short async DB session via AsyncSessionLocal() - chunked bulk insert features (2000 per chunk)
+                 and mark COMPLETED or FAILED.
+    """
+    await job_semaphore.acquire()
+    try:
+        logger.info(f"Processing started for file {file_id} ({original_filename})")
+
+        # --------------------------------------------------------------------------
+        # Phase (a) - Top Bread: Short async session - mark status as PROCESSING
+        # --------------------------------------------------------------------------
+        file_exists = False
+        async with AsyncSessionLocal() as db:
+            stmt = select(GeospatialFile).where(GeospatialFile.id == file_id)
+            result = await db.execute(stmt)
+            db_file = result.scalars().first()
+            if db_file:
+                db_file.status = FileStatus.PROCESSING
+                await db.commit()
+                file_exists = True
+            else:
+                logger.error(f"File ID {file_id} not found in database.")
+
+        if not file_exists:
+            _cleanup_temp_file(temp_file_path)
+            return
+
+        # --------------------------------------------------------------------------
+        # Phase (b) - Filling: Offloaded CPU-bound parsing & calculations (NO DB session held)
+        # --------------------------------------------------------------------------
+        feature_dicts, crs_str, error_msg, total_count = await asyncio.to_thread(
+            _cpu_bound_parse_and_measure,
+            temp_file_path,
+            original_filename,
+            file_id,
+        )
+
+        # --------------------------------------------------------------------------
+        # Phase (c) - Bottom Bread: Short async session - chunked bulk insert & mark terminal status
+        # --------------------------------------------------------------------------
+        async with AsyncSessionLocal() as db:
+            stmt = select(GeospatialFile).where(GeospatialFile.id == file_id)
+            result = await db.execute(stmt)
+            db_file = result.scalars().first()
+            if not db_file:
+                logger.error(f"File ID {file_id} disappeared from database.")
+                return
+
+            if error_msg is not None:
+                db_file.status = FileStatus.FAILED
+                db_file.error_message = error_msg
+                db_file.error = error_msg
+                await db.commit()
+                return
+
+            # Bulk insert in chunks of 2,000 rows per statement in one single transaction
+            CHUNK_SIZE = 2000
+            for i in range(0, len(feature_dicts), CHUNK_SIZE):
+                chunk = feature_dicts[i : i + CHUNK_SIZE]
+                await db.execute(insert(Feature), chunk)
+                await asyncio.sleep(0)
+
+            db_file.crs = crs_str
+            db_file.feature_count = total_count
+            db_file.status = FileStatus.COMPLETED
+            db_file.error_message = None
+            db_file.error = None
+            await db.commit()
+            logger.info(f"Successfully saved {total_count} features for file {file_id}.")
+    except Exception as unhandled_err:
+        logger.exception(f"Unhandled error in background task for file {file_id}: {unhandled_err}")
+        try:
+            async with AsyncSessionLocal() as db:
+                stmt = select(GeospatialFile).where(GeospatialFile.id == file_id)
+                res = await db.execute(stmt)
+                db_file = res.scalars().first()
+                if db_file:
+                    db_file.status = FileStatus.FAILED
+                    db_file.error_message = str(unhandled_err)
+                    db_file.error = str(unhandled_err)
+                    await db.commit()
+        except Exception as mark_err:
+            logger.error(f"Failed to record FAILED status for file {file_id}: {mark_err}")
+    finally:
+        job_semaphore.release()
 
 
 async def get_file_status_controller(file_id: UUID, db: AsyncSession) -> FileStatusResponse:
