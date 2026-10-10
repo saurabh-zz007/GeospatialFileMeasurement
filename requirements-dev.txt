@@ -1,0 +1,12 @@
+# ==============================================================================
+# Development, Testing, and Load Testing Dependencies
+# ==============================================================================
+-r requirements.txt
+
+# Testing & HTTP Client
+pytest==9.1.1
+httpx==0.28.1
+pytest-asyncio==1.4.0
+
+# Load Testing
+locust==2.46.7

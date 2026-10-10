@@ -25,38 +25,76 @@ The Geospatial File Measurement API accepts uploads of geospatial vectors in eit
 ## 2. Setup and Installation
 
 ### Prerequisites
-- Python 3.12 or higher
-- Docker (optional, for running local PostgreSQL) or an existing PostgreSQL instance
+- Python 3.12 (Tested on Python 3.12.10, compatible with Windows, Linux, and macOS)
 
-### 1. Clone & Set Up Virtual Environment
+### 1. Create and Activate Virtual Environment
+Clone or navigate to the repository root directory:
+
+**Windows (PowerShell):**
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+**Linux / macOS:**
 ```bash
-# Create virtual environment
-python -m venv myenv
+python3 -m venv .venv
+source .venv/bin/activate
+```
 
-# Activate virtual environment
-# Windows (PowerShell):
-.\myenv\Scripts\Activate.ps1
-# Linux / macOS:
-source myenv/bin/activate
+### 2. Install Dependencies
 
-# Install dependencies
+**Runtime Dependencies:**
+```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure Local PostgreSQL (Docker)
-If you do not have a PostgreSQL database running, launch a container with Docker:
+**Development & Test Dependencies (includes pytest, httpx, locust):**
 ```bash
-docker run --name geospatial-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=geospatial_db -p 5432:5432 -d postgres:16
-```
-The corresponding connection string is:
-```env
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/geospatial_db
+pip install -r requirements-dev.txt
 ```
 
-### 3. Environment Variables
-Copy the template configuration:
+Verify dependency tree integrity:
+```bash
+pip check
+```
+
+### 3. Environment Configuration
+Copy the sample environment file to `.env`:
+
+**Windows (PowerShell):**
+```powershell
+Copy-Item .env.example .env
+```
+
+**Linux / macOS:**
 ```bash
 cp .env.example .env
+```
+
+Ensure your `DATABASE_URL` in `.env` points to a reachable PostgreSQL database (e.g. `postgresql://postgres:password@localhost:5432/geospatial_db`). Database tables and indexes are initialized automatically on application startup via SQLAlchemy's lifespan handler.
+
+### 4. Running the Application Server
+Start the ASGI server with Uvicorn:
+
+```bash
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+- Interactive OpenAPI Documentation: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- Alternative ReDoc Documentation: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
+- Health Check: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+
+### 5. Running the Test Suite
+Execute the full test suite (35 automated tests covering geospatial geometry validation, UTM projections, background concurrency, bounded thread pools, rate limiting, and caching):
+
+```bash
+pytest -v
+```
+
+Execute load testing using Locust:
+```bash
+locust -f tests/locustfile.py --headless -u 10 -r 2 -t 30s --host http://127.0.0.1:8000
 ```
 
 Database tables are automatically created on application startup via SQLAlchemy's metadata initialization inside the FastAPI lifespan handler. No manual migration step is required for initial boot.
