@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile, status
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.utils.db import get_db
 from src.logs.controllers import (
@@ -28,9 +28,9 @@ router = APIRouter(prefix="/api/files", tags=["Geospatial Files"])
 async def upload_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Zipped Shapefile (.zip) or KML file (.kml)"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    return handle_file_upload(file=file, background_tasks=background_tasks, db=db)
+    return await handle_file_upload(file=file, background_tasks=background_tasks, db=db)
 
 
 @router.get(
@@ -39,11 +39,11 @@ async def upload_file(
     status_code=status.HTTP_200_OK,
     summary="Get file processing status and metadata",
 )
-def get_file_status(
+async def get_file_status(
     file_id: UUID,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    return get_file_status_controller(file_id=file_id, db=db)
+    return await get_file_status_controller(file_id=file_id, db=db)
 
 
 @router.get(
@@ -52,8 +52,8 @@ def get_file_status(
     status_code=status.HTTP_200_OK,
     summary="Get extracted features and measurements",
 )
-def get_file_measurements(
+async def get_file_measurements(
     file_id: UUID,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    return get_file_measurements_controller(file_id=file_id, db=db)
+    return await get_file_measurements_controller(file_id=file_id, db=db)

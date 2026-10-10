@@ -14,10 +14,11 @@ class Settings(BaseSettings):
     LOG_LEVEL: str
 
     # Database connection pool configuration
-    POOL_SIZE: int = 5
-    MAX_OVERFLOW: int = 10
-    POOL_TIMEOUT: float = 10.0
-    POOL_PRE_PING: bool = True
+    POOL_SIZE: int = 20
+    MAX_OVERFLOW: int = 20
+    POOL_TIMEOUT: float = 30.0
+    POOL_PRE_PING: bool = False
+    POOL_RECYCLE: int = 1800
 
     # Bounded background worker concurrency limit
     MAX_CONCURRENT_WORKERS: int = 4
