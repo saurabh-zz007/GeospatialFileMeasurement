@@ -36,8 +36,12 @@ class FeatureItemResponse(BaseModel):
     geometry_type: Optional[str] = None
     geometry: Optional[dict[str, Any]] = None
     properties: dict[str, Any]
-    measurement: Optional[float] = Field(default=None)
-    measurement_unit: Optional[str] = Field(default=None)
+    area: Optional[float] = Field(default=None)
+    area_unit: Optional[str] = Field(default=None)
+    perimeter: Optional[float] = Field(default=None)
+    perimeter_unit: Optional[str] = Field(default=None)
+    length: Optional[float] = Field(default=None)
+    length_unit: Optional[str] = Field(default=None)
     measurement_crs: Optional[str] = Field(default=None)
     note: Optional[str] = Field(default=None)
 

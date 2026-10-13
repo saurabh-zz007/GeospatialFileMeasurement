@@ -81,7 +81,9 @@ class Feature(Base):
     geometry_type = Column(String(50), nullable=True)
     geometry = Column(JSONType, nullable=True)
     properties = Column(JSONType, nullable=False, default=dict)
-    measurement = Column(Float, nullable=True)
+    area = Column(Float, nullable=True)
+    perimeter = Column(Float, nullable=True)
+    length = Column(Float, nullable=True)
     measurement_crs = Column(String(50), nullable=True)
     note = Column(Text, nullable=True)
 

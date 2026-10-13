@@ -171,6 +171,7 @@ def _cpu_bound_parse_and_measure(
             return None, crs_str, ERROR_NO_FEATURES, 0
 
         # Construct database feature dictionaries in thread to keep event loop free
+        # print(records)
         feature_dicts = [
             {
                 "id": uuid.uuid4(),
@@ -179,12 +180,15 @@ def _cpu_bound_parse_and_measure(
                 "geometry_type": rec["geometry_type"],
                 "geometry": rec["geometry"],
                 "properties": rec["properties"],
-                "measurement": rec["measurement"],
+                "area": rec["area"],
+                "perimeter": rec["perimeter"],
+                "length": rec["length"],
                 "measurement_crs": rec.get("measurement_crs"),
                 "note": rec.get("note"),
             }
             for rec in records
         ]
+        # print(feature_dicts)
         return feature_dicts, crs_str, None, len(records)
     except GeospatialProcessingError as proc_err:
         logger.warning(f"Processing error for file ({filename}): {proc_err.message}")
@@ -355,8 +359,12 @@ async def get_file_measurements_controller(file_id: UUID, db: AsyncSession) -> F
             geometry_type=f.geometry_type,
             geometry=f.geometry,
             properties=f.properties or {},
-            measurement=f.measurement,
-            measurement_unit=unit_mapping.get(f.geometry_type) if f.measurement is not None else None,
+            area=f.area,
+            area_unit=unit_mapping.get(f.geometry_type) if f.area is not None else None,
+            perimeter=f.perimeter,
+            perimeter_unit=unit_mapping.get(f.geometry_type) if f.perimeter is not None else None,
+            length=f.length,
+            length_unit=unit_mapping.get(f.geometry_type) if f.length is not None else None,
             measurement_crs=f.measurement_crs,
             note=f.note,
         )

@@ -166,30 +166,30 @@ def clean_feature_properties(
 
 def calculate_metric_measurement(
     geom_wgs84: Optional[BaseGeometry],
-) -> tuple[Optional[float], Optional[str], Optional[str], Optional[str]]:
+) -> tuple[Optional[float], Optional[str],Optional[float], Optional[str],Optional[float], Optional[str], Optional[str], Optional[str]]:
     """
     Calculates metric area or length by projecting 2D WGS84 geometry to appropriate UTM/polar CRS.
-    Returns: (measurement, measurement_unit, measurement_crs, note)
+    Returns: (area, area_unit, perimeter, perimeter_unit, measurement_crs, note)
     """
     if geom_wgs84 is None:
-        return None, None, None, "Geometry is null"
+        return None, None, None, None, None, None, None, "Geometry is null"
 
     if geom_wgs84.is_empty:
-        return None, None, None, "Geometry is empty"
+        return None, None, None, None, None, None, None, "Geometry is empty"
 
     if not geom_wgs84.is_valid:
         reason = shapely.validation.explain_validity(geom_wgs84)
-        return None, None, None, f"Invalid geometry: {reason}"
+        return None, None, None, None, None, None, None, f"Invalid geometry: {reason}"
 
     geom_type = geom_wgs84.geom_type
 
     # Point / MultiPoint: measurement null, no crash, no note
     if geom_type in ("Point", "MultiPoint"):
-        return None, None, None, None
+         return None, None, None, None, None, None, None, None
 
     # Unsupported types (GeometryCollection, etc.)
     if geom_type not in ("Polygon", "MultiPolygon", "LineString", "MultiLineString"):
-        return None, None, None, f"Unsupported geometry type: {geom_type}"
+        return None, None, None, None, None, None, None, f"Unsupported geometry type: {geom_type}"
 
     try:
         # Ignore Z coordinates (2D only)
@@ -197,7 +197,7 @@ def calculate_metric_measurement(
         centroid = geom_2d.centroid
 
         if centroid.is_empty or math.isnan(centroid.x) or math.isnan(centroid.y):
-            return None, None, None, "Could not compute geometry centroid"
+            return None, None, None, None, None, None, None, "Could not compute geometry centroid"
 
         target_crs = choose_measurement_crs(centroid.x, centroid.y)
         transformer = get_transformer(to_crs=target_crs, from_crs="EPSG:4326")
@@ -205,21 +205,25 @@ def calculate_metric_measurement(
 
         if geom_type in ("Polygon", "MultiPolygon"):
             # Area in square meters (holes are automatically subtracted)
-            measurement = round(float(proj_geom.area), 4)
-            unit = "sq meters"
+            area = round(float(proj_geom.area), 4)
+            area_unit = "sq meters"
+            perimeter = round(float(proj_geom.length), 4)
+            perimeter_unit = "meters"
+            return area, area_unit, perimeter, perimeter_unit, None, None, target_crs, None
         elif geom_type in ("LineString", "MultiLineString"):
             # Length in meters
-            measurement = round(float(proj_geom.length), 4)
-            unit = "meters"
+            length = round(float(proj_geom.length), 4)
+            length_unit = "meters"
+            return None, None, None, None, length, length_unit, target_crs, None
         else:
             measurement = None
             unit = None
 
-        return measurement, unit, target_crs, None
+        return None, None, None, None, None, None, None, None
 
     except Exception as exc:
         logger.warning(f"Error computing measurement for geometry {geom_type}: {exc}")
-        return None, None, None, f"Measurement calculation failed: {exc}"
+        return None, None, None, None, None, None, None, f"Measurement calculation failed: {exc}"
 
 
 def enable_kml_driver() -> None:
@@ -370,15 +374,15 @@ def extract_features_and_measurements(
 
     records = []
     for idx in range(len(gdf)):
-        if idx % 50 == 0:
-            time.sleep(0.001)
+        # if idx % 50 == 0:
+        #     time.sleep(0.001)
 
         orig_geom = geoms[idx]
 
         geom_type = orig_geom.geom_type if orig_geom is not None else None
         geom_2d_wgs84 = shapely.force_2d(orig_geom) if orig_geom is not None else None
 
-        measurement, unit, measurement_crs, note = calculate_metric_measurement(orig_geom)
+        area, area_unit, perimeter, perimeter_unit, length, length_unit, measurement_crs, note = calculate_metric_measurement(orig_geom)
         clean_properties = clean_feature_properties(props_records[idx], is_kml=is_kml)
 
         # Round returned geometry coordinates to 9 decimals
@@ -390,8 +394,12 @@ def extract_features_and_measurements(
             "geometry_type": geom_type,
             "geometry": sanitize_for_json(rounded_geom) if rounded_geom is not None else None,
             "properties": clean_properties,
-            "measurement": measurement,
-            "measurement_unit": unit,
+            "area": area,
+            "area_unit": area_unit,
+            "perimeter": perimeter,
+            "perimeter_unit": perimeter_unit,
+            "length": length,
+            "length_unit": length_unit,
             "measurement_crs": measurement_crs,
             "note": note,
         })
